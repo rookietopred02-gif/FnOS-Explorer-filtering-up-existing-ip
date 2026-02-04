@@ -173,23 +173,47 @@ def get_targets_paginated(page=1, per_page=50, status_filter=None, search_query=
     }
 
 
-def get_status_counts():
-    """获取各状态的数量统计"""
+def get_status_counts(dedup_ip: bool = False):
+    """获取各状态的数量统计。
+
+    当 dedup_ip=True 时，统计口径与列表去重显示一致：同一个 ip 只计入一条（取该 ip 的最新记录：MAX(id)）。
+    对于 ip 为空/NULL 的记录，不做去重（原样计数）。
+    """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT status, COUNT(*) as count 
-        FROM targets 
-        GROUP BY status
-    """)
+
+    if dedup_ip:
+        cursor.execute("""
+            WITH deduped AS (
+                SELECT MAX(id) AS id
+                FROM targets
+                WHERE ip IS NOT NULL AND TRIM(ip) <> ''
+                GROUP BY ip
+                UNION ALL
+                SELECT id
+                FROM targets
+                WHERE ip IS NULL OR TRIM(ip) = ''
+            )
+            SELECT t.status, COUNT(*) AS count
+            FROM targets t
+            JOIN deduped d ON t.id = d.id
+            GROUP BY t.status
+        """)
+    else:
+        cursor.execute("""
+            SELECT status, COUNT(*) as count 
+            FROM targets 
+            GROUP BY status
+        """)
+
     rows = cursor.fetchall()
     conn.close()
-    
+
     counts = {'all': 0}
-    for row in rows:
-        counts[row[0]] = row[1]
-        counts['all'] += row[1]
-    
+    for status, cnt in rows:
+        counts[status] = cnt
+        counts['all'] += cnt
+
     return counts
 
 def get_target_by_id(tid):

@@ -66,7 +66,7 @@ def index():
     )
     
     # 获取状态统计
-    status_counts = get_status_counts()
+    status_counts = get_status_counts(dedup_ip=dedup_ip)
     
     return render_template('index.html', 
                          targets=pagination['items'],
@@ -115,7 +115,7 @@ def scan_pending_route():
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
     """获取统计数据 API"""
-    status_counts = get_status_counts()
+    status_counts = get_status_counts(dedup_ip=dedup_ip)
     return jsonify(status_counts)
 
 
