@@ -1,6 +1,7 @@
+import os
 import sqlite3
 
-DB_PATH = 'vuln_targets.db'
+DB_PATH = os.path.join(os.path.dirname(__file__), 'vuln_targets.db')
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -89,7 +90,7 @@ def get_all_targets():
     conn.close()
     return rows
 
-def get_targets_paginated(page=1, per_page=50, status_filter=None, search_query=None):
+def get_targets_paginated(page=1, per_page=50, status_filter=None, search_query=None, dedup_ip=False):
     """分页获取目标，支持筛选和搜索"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -109,19 +110,60 @@ def get_targets_paginated(page=1, per_page=50, status_filter=None, search_query=
     
     where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
     
-    # 获取总数
-    count_query = f"SELECT COUNT(*) as total FROM targets{where_clause}"
-    cursor.execute(count_query, params)
-    total = cursor.fetchone()['total']
-    
-    # 获取分页数据
-    offset = (page - 1) * per_page
-    data_query = f"SELECT * FROM targets{where_clause} ORDER BY id DESC LIMIT ? OFFSET ?"
-    cursor.execute(data_query, params + [per_page, offset])
-    rows = cursor.fetchall()
-    
+
+    # 获取总数（根据是否去重计算）
+    if dedup_ip:
+        # 去重规则：同一个 ip 只显示一条（取该 ip 的最新记录：MAX(id)）
+        # 对于 ip 为空/NULL 的记录，不做去重（原样全部显示）
+        count_query = f'''
+        WITH filtered AS (
+            SELECT * FROM targets{where_clause}
+        ),
+        deduped AS (
+            SELECT MAX(id) AS id FROM filtered
+            WHERE ip IS NOT NULL AND TRIM(ip) <> ''
+            GROUP BY ip
+            UNION ALL
+            SELECT id FROM filtered
+            WHERE ip IS NULL OR TRIM(ip) = ''
+        )
+        SELECT COUNT(*) AS total FROM deduped
+        '''
+        cursor.execute(count_query, params)
+        total = cursor.fetchone()['total']
+
+        offset = (page - 1) * per_page
+        data_query = f'''
+        WITH filtered AS (
+            SELECT * FROM targets{where_clause}
+        ),
+        deduped AS (
+            SELECT MAX(id) AS id FROM filtered
+            WHERE ip IS NOT NULL AND TRIM(ip) <> ''
+            GROUP BY ip
+            UNION ALL
+            SELECT id FROM filtered
+            WHERE ip IS NULL OR TRIM(ip) = ''
+        )
+        SELECT t.* FROM targets t
+        JOIN deduped d ON t.id = d.id
+        ORDER BY t.id DESC
+        LIMIT ? OFFSET ?
+        '''
+        cursor.execute(data_query, params + [per_page, offset])
+        rows = cursor.fetchall()
+    else:
+        count_query = f"SELECT COUNT(*) as total FROM targets{where_clause}"
+        cursor.execute(count_query, params)
+        total = cursor.fetchone()['total']
+
+        offset = (page - 1) * per_page
+        data_query = f"SELECT * FROM targets{where_clause} ORDER BY id DESC LIMIT ? OFFSET ?"
+        cursor.execute(data_query, params + [per_page, offset])
+        rows = cursor.fetchall()
+
     conn.close()
-    
+
     return {
         'items': rows,
         'total': total,
@@ -129,6 +171,7 @@ def get_targets_paginated(page=1, per_page=50, status_filter=None, search_query=
         'per_page': per_page,
         'total_pages': (total + per_page - 1) // per_page
     }
+
 
 def get_status_counts():
     """获取各状态的数量统计"""

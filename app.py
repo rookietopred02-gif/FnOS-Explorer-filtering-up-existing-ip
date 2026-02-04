@@ -54,13 +54,15 @@ def index():
     per_page = request.args.get('per_page', 50, type=int)
     status_filter = request.args.get('status', 'Vulnerable')  # 默认筛选漏洞
     search_query = request.args.get('search', '')
+    dedup_ip = request.args.get('dedup_ip', '0') == '1'
     
     # 获取分页数据
     pagination = get_targets_paginated(
         page=page,
         per_page=per_page,
         status_filter=status_filter if status_filter != 'all' else None,
-        search_query=search_query if search_query else None
+        search_query=search_query if search_query else None,
+        dedup_ip=dedup_ip
     )
     
     # 获取状态统计
@@ -71,7 +73,8 @@ def index():
                          pagination=pagination,
                          status_counts=status_counts,
                          current_status=status_filter,
-                         search_query=search_query)
+                         search_query=search_query,
+                         dedup_ip=dedup_ip)
 
 
 @app.route('/import', methods=['POST'])
