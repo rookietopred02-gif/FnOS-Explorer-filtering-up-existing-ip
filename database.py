@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from datetime import datetime, timezone
 
 DB_PATH = os.path.join(os.path.dirname(__file__), 'vuln_targets.db')
 
@@ -22,6 +23,33 @@ def init_db():
             root_content TEXT      -- 根目录的 HTML 响应快照
         )
     ''')
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS nsfw_scan_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_id INTEGER NOT NULL,
+            remote_path TEXT NOT NULL,
+            dir_path TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            media_type TEXT,
+            score REAL,
+            threshold REAL,
+            decision TEXT,          -- 'nsfw' | 'clean' | 'error' | 'unsupported'
+            model TEXT,
+            details_json TEXT,
+            error TEXT,
+            scanned_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(target_id, remote_path)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_nsfw_scan_results_score ON nsfw_scan_results(score)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_nsfw_scan_results_target ON nsfw_scan_results(target_id)"
+    )
     conn.commit()
     conn.close()
 
@@ -224,3 +252,178 @@ def get_target_by_id(tid):
     row = cursor.fetchone()
     conn.close()
     return row
+
+
+def get_targets_by_status(status: str, dedup_ip: bool = False):
+    """Get all targets filtered by status.
+
+    When dedup_ip=True, same dedup semantics as the main list: one row per IP (latest id).
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    if dedup_ip:
+        cursor.execute(
+            """
+            WITH filtered AS (
+                SELECT * FROM targets
+                WHERE status = ?
+            ),
+            deduped AS (
+                SELECT MAX(id) AS id
+                FROM filtered
+                WHERE ip IS NOT NULL AND TRIM(ip) <> ''
+                GROUP BY ip
+                UNION ALL
+                SELECT id
+                FROM filtered
+                WHERE ip IS NULL OR TRIM(ip) = ''
+            )
+            SELECT t.*
+            FROM targets t
+            JOIN deduped d ON t.id = d.id
+            ORDER BY t.id DESC
+            """,
+            (status,),
+        )
+    else:
+        cursor.execute("SELECT * FROM targets WHERE status = ? ORDER BY id DESC", (status,))
+
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def upsert_nsfw_scan_result(
+    *,
+    target_id: int,
+    remote_path: str,
+    dir_path: str,
+    filename: str,
+    media_type: str | None,
+    score: float | None,
+    threshold: float | None,
+    decision: str,
+    model: str | None,
+    details_json: str | None,
+    error: str | None,
+):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    now = _utc_now_iso()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO nsfw_scan_results
+              (target_id, remote_path, dir_path, filename, media_type, score, threshold, decision, model, details_json, error, scanned_at, updated_at)
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(target_id, remote_path) DO UPDATE SET
+              dir_path=excluded.dir_path,
+              filename=excluded.filename,
+              media_type=excluded.media_type,
+              score=excluded.score,
+              threshold=excluded.threshold,
+              decision=excluded.decision,
+              model=excluded.model,
+              details_json=excluded.details_json,
+              error=excluded.error,
+              updated_at=excluded.updated_at
+            """,
+            (
+                target_id,
+                remote_path,
+                dir_path,
+                filename,
+                media_type,
+                score,
+                threshold,
+                decision,
+                model,
+                details_json,
+                error,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"DB upsert nsfw_scan_results error: {e}")
+    finally:
+        conn.close()
+
+
+def get_nsfw_scan_result(target_id: int, remote_path: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM nsfw_scan_results WHERE target_id = ? AND remote_path = ?",
+        (target_id, remote_path),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
+def get_nsfw_scan_results_for_paths(target_id: int, remote_paths: list[str]):
+    if not remote_paths:
+        return {}
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    results: dict[str, sqlite3.Row] = {}
+    try:
+        chunk_size = 900
+        for start in range(0, len(remote_paths), chunk_size):
+            chunk = remote_paths[start : start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor.execute(
+                f"""
+                SELECT * FROM nsfw_scan_results
+                WHERE target_id = ? AND remote_path IN ({placeholders})
+                """,
+                [target_id, *chunk],
+            )
+            for row in cursor.fetchall():
+                results[row["remote_path"]] = row
+    finally:
+        conn.close()
+
+    return results
+
+
+def list_nsfw_flagged(*, threshold: float = 0.7, limit: int = 2000):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+          n.*,
+          t.base_url AS base_url,
+          t.ip AS ip,
+          t.port AS port,
+          t.host AS host,
+          t.region AS region,
+          t.city AS city,
+          t.status AS status
+        FROM nsfw_scan_results n
+        JOIN targets t ON t.id = n.target_id
+        WHERE n.score IS NOT NULL AND n.score >= ?
+        ORDER BY n.score DESC, n.updated_at DESC
+        LIMIT ?
+        """,
+        (threshold, limit),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
